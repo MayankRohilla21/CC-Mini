@@ -1,0 +1,160 @@
+# Gateway Service — Distributed Drawing Board
+
+## 📌 Overview
+
+This is the **Gateway Service** for a Distributed Real-Time Drawing Board using Mini-RAFT.
+
+The gateway acts as a bridge between:
+
+* 🧑‍💻 Clients (browser)
+* 🧠 Replica cluster (RAFT nodes)
+
+---
+
+## ⚙️ Responsibilities
+
+* Accept WebSocket connections from clients
+* Forward drawing strokes to the current **leader replica**
+* Receive committed strokes from replicas
+* Broadcast updates to all connected clients
+* Handle leader failure and retry automatically
+
+---
+
+## 📦 Dependencies
+
+Install using:
+
+```
+npm install express ws axios
+```
+
+| Package | Purpose                   |
+| ------- | ------------------------- |
+| express | REST API server           |
+| ws      | WebSocket server          |
+| axios   | HTTP requests to replicas |
+
+---
+
+## 🚀 How to Run
+
+```
+node server.js
+```
+
+Runs on:
+
+```
+http://localhost:3000
+```
+
+---
+
+## 🔌 APIs
+
+### 1. POST /commit-stroke
+
+Used by replicas to send committed strokes.
+
+---
+
+### 2. WebSocket Connection
+
+Client connects to:
+
+```
+ws://localhost:3000
+```
+
+Send:
+
+```
+{
+  "type": "stroke",
+  "data": { "x": 10, "y": 20 }
+}
+```
+
+---
+
+## 🧠 What I Implemented
+
+* WebSocket server for real-time communication
+* Leader detection logic
+* Stroke forwarding to leader
+* Retry mechanism on leader failure
+* Broadcasting committed strokes to all clients
+* Logging for debugging and demo
+
+---
+
+## ⚠️ What is Pending
+
+* Integration with actual RAFT replicas
+* Docker containerization
+* Advanced failover testing
+* Multi-client stress testing
+
+---
+
+## 🔗 Integration Guide (FOR TEAM)
+
+### Replicas must implement:
+
+#### 1. Leader Check
+
+```
+GET /leader
+Response:
+{
+  "isLeader": true/false
+}
+```
+
+#### 2. Append Entries
+
+```
+POST /append-entries
+Body:
+{
+  "stroke": {...}
+}
+```
+
+#### 3. Commit Callback
+
+```
+POST http://gateway:3000/commit-stroke
+```
+
+---
+
+## 🧪 Testing
+
+Use browser console:
+
+```
+const ws = new WebSocket("ws://localhost:3000");
+
+ws.onmessage = (msg) => console.log(msg.data);
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: "stroke",
+    data: { x: 10, y: 20 }
+  }));
+};
+```
+
+---
+
+## 📊 Status
+
+✅ Gateway core complete
+🔄 Ready for integration
+🚀 Demo-ready
+
+---
+
+
