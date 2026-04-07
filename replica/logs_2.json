@@ -1,0 +1,35 @@
+[
+  {
+    "term": 1,
+    "index": 1,
+    "command": {
+      "type": "stroke",
+      "data": {
+        "x": 100,
+        "y": 200
+      }
+    }
+  },
+  {
+    "term": 1,
+    "index": 2,
+    "command": {
+      "type": "stroke",
+      "data": {
+        "x": 150,
+        "y": 250
+      }
+    }
+  },
+  {
+    "term": 1,
+    "index": 3,
+    "command": {
+      "type": "stroke",
+      "data": {
+        "x": 300,
+        "y": 400
+      }
+    }
+  }
+]
