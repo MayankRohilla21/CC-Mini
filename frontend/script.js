@@ -27,6 +27,7 @@ class CollaborativeWhiteboard {
         this.wsUrl = 'ws://localhost:8080';
         this.reconnectInterval = 2000; // 2 seconds
         this.reconnectTimer = null;
+        this.pendingLocalStrokeCounts = new Map();
 
         // Initialize
         this.setupEventListeners();
@@ -44,9 +45,10 @@ class CollaborativeWhiteboard {
         this.canvas.addEventListener('mouseout', () => this.stopDrawing());
 
         // Canvas drawing - Touch events
-        this.canvas.addEventListener('touchstart', (e) => this.startDrawing(e, true));
-        this.canvas.addEventListener('touchmove', (e) => this.draw(e, true));
-        this.canvas.addEventListener('touchend', () => this.stopDrawing());
+        this.canvas.addEventListener('touchstart', (e) => this.startDrawing(e, true), { passive: false });
+        this.canvas.addEventListener('touchmove', (e) => this.draw(e, true), { passive: false });
+        this.canvas.addEventListener('touchend', () => this.stopDrawing(), { passive: false });
+        this.canvas.addEventListener('touchcancel', () => this.stopDrawing(), { passive: false });
 
         // UI controls
         this.colorPicker.addEventListener('change', (e) => {
@@ -123,6 +125,7 @@ class CollaborativeWhiteboard {
                 }
             };
             this.ws.send(JSON.stringify(strokeData));
+            this.rememberLocalStroke(strokeData.data);
             console.log('[Frontend] Stroke sent:', strokeData.data);
         } else {
             console.warn('[Frontend] WebSocket not ready, stroke not sent');
@@ -197,6 +200,12 @@ class CollaborativeWhiteboard {
     handleMessage(message) {
         if (message.type === 'commit') {
             const { data } = message;
+            if (!data) {
+                return;
+            }
+            if (this.consumeLocalStroke(data)) {
+                return;
+            }
             console.log('[Frontend] Commit received, drawing stroke:', data);
             // Draw the committed stroke (from other users)
             this.drawStroke(
@@ -210,6 +219,30 @@ class CollaborativeWhiteboard {
         } else {
             console.warn('[Frontend] Unknown message type:', message.type);
         }
+    }
+
+    buildStrokeKey(data) {
+        return `${data.prevX}|${data.prevY}|${data.x}|${data.y}|${data.color}|${data.size}`;
+    }
+
+    rememberLocalStroke(data) {
+        const key = this.buildStrokeKey(data);
+        const currentCount = this.pendingLocalStrokeCounts.get(key) || 0;
+        this.pendingLocalStrokeCounts.set(key, currentCount + 1);
+    }
+
+    consumeLocalStroke(data) {
+        const key = this.buildStrokeKey(data);
+        const currentCount = this.pendingLocalStrokeCounts.get(key) || 0;
+        if (currentCount <= 0) {
+            return false;
+        }
+        if (currentCount === 1) {
+            this.pendingLocalStrokeCounts.delete(key);
+        } else {
+            this.pendingLocalStrokeCounts.set(key, currentCount - 1);
+        }
+        return true;
     }
 
     scheduleReconnect() {
