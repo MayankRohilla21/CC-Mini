@@ -28,6 +28,9 @@ class CollaborativeWhiteboard {
         this.reconnectInterval = 2000; // 2 seconds
         this.reconnectTimer = null;
         this.pendingLocalStrokeCounts = new Map();
+        this.pendingStrokeTTL = 15000; // 15 seconds
+        this.maxPendingStrokes = 5000;
+        this.coordinatePrecision = 2;
 
         // Initialize
         this.setupEventListeners();
@@ -222,27 +225,91 @@ class CollaborativeWhiteboard {
     }
 
     buildStrokeKey(data) {
-        return `${data.prevX}|${data.prevY}|${data.x}|${data.y}|${data.color}|${data.size}`;
+        const prevX = this.normalizeCoordinate(data.prevX);
+        const prevY = this.normalizeCoordinate(data.prevY);
+        const x = this.normalizeCoordinate(data.x);
+        const y = this.normalizeCoordinate(data.y);
+        if (prevX === null || prevY === null || x === null || y === null) {
+            console.warn('[Frontend] Invalid stroke coordinates for dedupe:', {
+                prevX: data.prevX,
+                prevY: data.prevY,
+                x: data.x,
+                y: data.y
+            });
+            return null;
+        }
+        return `${prevX}|${prevY}|${x}|${y}|${data.color}|${data.size}`;
+    }
+
+    normalizeCoordinate(value) {
+        const numberValue = Number(value);
+        if (!Number.isFinite(numberValue)) {
+            return null;
+        }
+        return numberValue.toFixed(this.coordinatePrecision);
     }
 
     rememberLocalStroke(data) {
+        this.cleanupPendingLocalStrokes();
         const key = this.buildStrokeKey(data);
-        const currentCount = this.pendingLocalStrokeCounts.get(key) || 0;
-        this.pendingLocalStrokeCounts.set(key, currentCount + 1);
+        if (!key) {
+            return;
+        }
+        const now = Date.now();
+        const existingEntry = this.pendingLocalStrokeCounts.get(key);
+        if (existingEntry) {
+            existingEntry.count += 1;
+            existingEntry.lastUpdated = now;
+            this.pendingLocalStrokeCounts.set(key, existingEntry);
+        } else {
+            this.pendingLocalStrokeCounts.set(key, { count: 1, lastUpdated: now });
+        }
+        while (this.pendingLocalStrokeCounts.size > this.maxPendingStrokes) {
+            const oldestKey = this.findOldestPendingStrokeKey();
+            if (!oldestKey) break;
+            this.pendingLocalStrokeCounts.delete(oldestKey);
+        }
     }
 
     consumeLocalStroke(data) {
+        this.cleanupPendingLocalStrokes();
         const key = this.buildStrokeKey(data);
-        const currentCount = this.pendingLocalStrokeCounts.get(key) || 0;
-        if (currentCount <= 0) {
+        if (!key) {
             return false;
         }
-        if (currentCount === 1) {
+        const entry = this.pendingLocalStrokeCounts.get(key);
+        if (!entry || entry.count <= 0) {
+            return false;
+        }
+        if (entry.count === 1) {
             this.pendingLocalStrokeCounts.delete(key);
         } else {
-            this.pendingLocalStrokeCounts.set(key, currentCount - 1);
+            entry.count -= 1;
+            entry.lastUpdated = Date.now();
+            this.pendingLocalStrokeCounts.set(key, entry);
         }
         return true;
+    }
+
+    cleanupPendingLocalStrokes() {
+        const now = Date.now();
+        for (const [key, entry] of this.pendingLocalStrokeCounts.entries()) {
+            if ((now - entry.lastUpdated) > this.pendingStrokeTTL) {
+                this.pendingLocalStrokeCounts.delete(key);
+            }
+        }
+    }
+
+    findOldestPendingStrokeKey() {
+        let oldestKey = null;
+        let oldestTimestamp = Infinity;
+        for (const [key, entry] of this.pendingLocalStrokeCounts.entries()) {
+            if (entry.lastUpdated < oldestTimestamp) {
+                oldestTimestamp = entry.lastUpdated;
+                oldestKey = key;
+            }
+        }
+        return oldestKey;
     }
 
     scheduleReconnect() {
