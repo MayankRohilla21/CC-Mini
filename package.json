@@ -1,0 +1,17 @@
+{
+  "name": "cc-mini",
+  "version": "1.0.0",
+  "description": "A distributed real-time collaborative whiteboard built with RAFT consensus protocol. Multiple users can draw simultaneously, and all strokes are synchronized via a RAFT cluster with automatic leader election and crash recovery.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.15.0",
+    "express": "^5.2.1",
+    "ws": "^8.20.0"
+  }
+}
