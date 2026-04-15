@@ -4,7 +4,14 @@
   "description": "A distributed real-time collaborative whiteboard built with RAFT consensus protocol. Multiple users can draw simultaneously, and all strokes are synchronized via a RAFT cluster with automatic leader election and crash recovery.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev:gateway": "nodemon --watch gateway --ext js,json gateway/server.js",
+    "dev:replica1": "cross-env ID=node1 PORT=5001 nodemon --watch replica --ext js,json replica/server.js",
+    "dev:replica2": "cross-env ID=node2 PORT=5002 nodemon --watch replica --ext js,json replica/server.js",
+    "dev:replica3": "cross-env ID=node3 PORT=5003 nodemon --watch replica --ext js,json replica/server.js",
+    "compose:up": "docker compose up --build",
+    "compose:down": "docker compose down",
+    "compose:logs": "docker compose logs -f",
+    "test": "echo \"No automated tests yet\""
   },
   "keywords": [],
   "author": "",
@@ -13,5 +20,9 @@
     "axios": "^1.15.0",
     "express": "^5.2.1",
     "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "nodemon": "^3.1.10"
   }
 }

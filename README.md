@@ -37,7 +37,7 @@ CC-Mini/
 
 ```bash
 # Start all services (gateway + 3 RAFT replicas)
-docker-compose up
+docker compose up --build
 
 # In another terminal, open the frontend
 open frontend/index.html
@@ -54,6 +54,7 @@ open frontend/index.html
 
 - **[Frontend Documentation](frontend/FRONTEND.md)** - How the frontend works, architecture, and talking points for viva
 - **[Gateway Integration Guide](GATEWAY_INTEGRATION.md)** - What your Gateway must do to integrate with the frontend
+- **[DevOps Runbook](DEVOPS.md)** - Docker setup, failover tests, hot-reload tests, and logs
 3. Try killing a replica to test failover:
    ```bash
    docker stop replica1
@@ -192,6 +193,7 @@ ls -la frontend/
 - **Backend**: (Teammate - likely Node.js/Python/Go)
 - **Consensus**: RAFT protocol
 - **Deployment**: Docker Compose
+- **Observability**: Structured JSON logs + health endpoints
 
 ## Notes for Viva/Demo
 
