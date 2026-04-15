@@ -14,6 +14,13 @@ function incrementTerm() {
   votedFor = null;
 }
 
+function setTerm(term) {
+  if (term > currentTerm) {
+    currentTerm = term;
+    votedFor = null;
+  }
+}
+
 function voteFor(candidateId) {
   votedFor = candidateId;
 }
@@ -27,6 +34,7 @@ module.exports = {
   setState,
   getTerm: () => currentTerm,
   incrementTerm,
+  setTerm,
   voteFor,
   getVotedFor: () => votedFor,
   setLeader,

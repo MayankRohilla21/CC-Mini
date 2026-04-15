@@ -3,8 +3,9 @@ const router = express.Router();
 
 const state = require("./state");
 const { resetElectionTimer } = require("./timers");
-const { startElection } = require("./raft");
+const { syncWithLeader } = require("./raft");
 const log = require("./log");
+const logger = require("./logger");
 
 // GET LOG ENDPOINT
 router.get("/log", (req, res) => {
@@ -16,8 +17,7 @@ router.get("/log", (req, res) => {
  */
 router.post("/request-vote", (req, res) => {
   const { term, candidateId } = req.body;
-
-  console.log(`[${process.env.ID}] Vote request from ${candidateId} (term ${term})`);
+  logger.info("REQUEST_VOTE_RECEIVED", { candidateId, term });
 
   // Reject if term is stale
   if (term < state.getTerm()) {
@@ -29,7 +29,7 @@ router.post("/request-vote", (req, res) => {
 
   // If term is higher → update term and convert to follower
   if (term > state.getTerm()) {
-    state.incrementTerm(); // reset votedFor internally
+    state.setTerm(term);
     state.setState("FOLLOWER");
   }
 
@@ -40,7 +40,7 @@ router.post("/request-vote", (req, res) => {
     // Reset election timer since we heard from candidate
     resetElectionTimer();
 
-    console.log(`[${process.env.ID}] Voted for ${candidateId}`);
+    logger.info("VOTE_GRANTED", { candidateId, term: state.getTerm() });
 
     return res.json({
       voteGranted: true,
@@ -60,17 +60,16 @@ router.post("/request-vote", (req, res) => {
  */
 router.post("/heartbeat", (req, res) => {
   const { term, leaderId } = req.body;
-
-  console.log(`[${process.env.ID}] Heartbeat from ${leaderId} (term ${term})`);
+  logger.info("HEARTBEAT_RECEIVED", { leaderId, term });
 
   // Ignore stale leader
   if (term < state.getTerm()) {
-    return res.sendStatus(200);
+    return res.json({ term: state.getTerm() });
   }
 
   // If newer term → update
   if (term > state.getTerm()) {
-    state.incrementTerm();
+    state.setTerm(term);
   }
 
   // 🔥 ONLY change state if needed
@@ -83,7 +82,7 @@ router.post("/heartbeat", (req, res) => {
   // Reset election timer
   resetElectionTimer();
 
-  res.sendStatus(200);
+  res.json({ term: state.getTerm() });
 });
 
 /**
@@ -99,31 +98,47 @@ router.get("/leader", (req, res) => {
 
 
 router.post("/append-entries", (req, res) => {
-  const { term, leaderId, entry } = req.body;
-
-  console.log(`[${process.env.ID}] AppendEntries from ${leaderId}`);
+  const { term, leaderId, prevLogIndex, entry } = req.body;
+  logger.info("APPEND_ENTRIES_RECEIVED", { leaderId, term, prevLogIndex });
 
   // Reject stale leader
   if (term < state.getTerm()) {
-    return res.json({ success: false });
+    return res.json({ success: false, term: state.getTerm() });
   }
 
-  // Become follower if needed
+  if (term > state.getTerm()) {
+    state.setTerm(term);
+  }
+
   if (state.getState() !== "FOLLOWER") {
     state.setState("FOLLOWER");
   }
 
   state.setLeader(leaderId);
 
-  // Append entry
+  if (Number.isInteger(prevLogIndex) && prevLogIndex > log.getLastIndex()) {
+    logger.warn("APPEND_REJECT_NEEDS_SYNC", {
+      leaderId,
+      prevLogIndex,
+      lastIndex: log.getLastIndex(),
+    });
+    return res.json({
+      success: false,
+      needSync: true,
+      lastIndex: log.getLastIndex(),
+      term: state.getTerm(),
+    });
+  }
+
   if (entry) {
-    log.appendEntry(entry);
+    log.appendEntry(entry, term);
+    logger.info("ENTRY_APPENDED", { index: entry.index });
   }
 
   // Reset timer
   resetElectionTimer();
 
-  res.json({ success: true });
+  res.json({ success: true, term: state.getTerm() });
 });
 
 const { replicateEntry } = require("./raft");
@@ -139,24 +154,59 @@ router.post("/stroke", async (req, res) => {
     });
   }
 
-  console.log(`[${process.env.ID}] Received stroke`);
+  logger.info("STROKE_RECEIVED_FROM_GATEWAY");
 
-  const committed = await replicateEntry(entry);
+  const result = await replicateEntry(entry);
 
-  if (committed) {
-    res.json({ success: true, entry });
+  if (result.committed) {
+    res.json({ success: true, entry: result.entry });
   } else {
     res.status(500).json({ success: false });
   }
 });
 
 router.get("/sync-log", (req, res) => {
-  console.log(`[${process.env.ID}] Sending log for sync`);
+  const from = parseInt(req.query.from || "0", 10);
+  const startIndex = Number.isNaN(from) ? 0 : Math.max(0, from);
+  const entries = log.getEntriesFrom(startIndex);
+  logger.info("SYNC_LOG_REQUEST", { from: startIndex, count: entries.length });
 
   res.json({
-    log: log.getLog(),
+    log: entries,
     term: state.getTerm(),
+    commitIndex: log.getCommitIndex(),
   });
+});
+
+router.post("/install-entries", (req, res) => {
+  const { term, leaderId, entries = [], commitIndex } = req.body;
+  if (term < state.getTerm()) {
+    return res.json({ success: false, term: state.getTerm() });
+  }
+
+  if (term > state.getTerm()) {
+    state.setTerm(term);
+  }
+
+  state.setLeader(leaderId);
+  state.setState("FOLLOWER");
+  log.installEntries(entries);
+  if (Number.isInteger(commitIndex) && commitIndex >= 0) {
+    log.commit(commitIndex);
+  }
+  resetElectionTimer();
+  logger.info("INSTALL_ENTRIES_RECEIVED", { leaderId, count: entries.length, commitIndex });
+  res.json({ success: true, term: state.getTerm() });
+});
+
+router.post("/resync", async (req, res) => {
+  const { leaderUrl, from = 0 } = req.body;
+  if (!leaderUrl) {
+    return res.status(400).json({ success: false, error: "leaderUrl required" });
+  }
+
+  const ok = await syncWithLeader(leaderUrl, from);
+  res.json({ success: ok });
 });
 
 module.exports = router;

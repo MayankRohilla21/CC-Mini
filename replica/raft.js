@@ -1,6 +1,7 @@
 const axios = require("axios");
 const state = require("./state");
-
+const log = require("./log");
+const logger = require("./logger");
 const {
   resetElectionTimer,
   startHeartbeat,
@@ -8,39 +9,34 @@ const {
   setElectionCallback,
 } = require("./timers");
 
-const peers = [
-  "http://localhost:5001",
-  "http://localhost:5002",
-  "http://localhost:5003",
-];
+const peers = (process.env.PEERS || "http://localhost:5001,http://localhost:5002,http://localhost:5003")
+  .split(",")
+  .map((peer) => peer.trim())
+  .filter(Boolean);
 
 const id = process.env.ID || "node1";
 const port = process.env.PORT;
 
-/**
- * START RAFT SYSTEM
- */
+function stepDownAndAdoptTerm(newTerm, leader = null) {
+  state.setTerm(newTerm);
+  state.setState("FOLLOWER");
+  if (leader) state.setLeader(leader);
+}
+
 async function startRaft() {
   setElectionCallback(startElection);
+  logger.info("RAFT_START", { peers });
 
-  // 🔥 Try syncing before election
-  for (let peer of peers) {
+  for (const peer of peers) {
     if (peer.endsWith(port)) continue;
-
-    try {
-      await syncWithLeader(peer);
-      break;
-    } catch (err) {}
+    const synced = await syncWithLeader(peer, 0);
+    if (synced) break;
   }
 
   resetElectionTimer();
 }
 
-/**
- * START ELECTION
- */
 async function startElection() {
-  // If already leader → ignore
   if (state.getState() === "LEADER") return;
 
   state.setState("CANDIDATE");
@@ -49,11 +45,9 @@ async function startElection() {
 
   const currentTerm = state.getTerm();
   let votes = 1;
+  logger.info("ELECTION_STARTED", { term: currentTerm });
 
-  console.log(`[${id}] Starting election for term ${currentTerm}`);
-
-  for (let peer of peers) {
-    // Skip self
+  for (const peer of peers) {
     if (peer.endsWith(port)) continue;
 
     try {
@@ -63,117 +57,145 @@ async function startElection() {
       });
 
       const { voteGranted, term } = res.data;
-
-      // 🔥 If we see higher term → step down
       if (term > state.getTerm()) {
-        state.setState("FOLLOWER");
+        stepDownAndAdoptTerm(term);
+        logger.warn("ELECTION_ABORT_HIGHER_TERM", { peer, higherTerm: term });
         return;
       }
-
       if (voteGranted) votes++;
     } catch (err) {
-      // Ignore network failures
+      logger.warn("VOTE_RPC_FAILED", { peer, error: err.message });
     }
   }
 
-  // Majority = 2 (in 3 nodes)
   if (votes >= 2 && state.getState() === "CANDIDATE") {
     becomeLeader();
   } else {
+    logger.info("ELECTION_RETRY", { term: currentTerm, votes });
     resetElectionTimer();
   }
 }
 
-/**
- * BECOME LEADER
- */
 function becomeLeader() {
   state.setState("LEADER");
   state.setLeader(id);
-
-  console.log(`[${id}] Became LEADER`);
-
-  // 🔥 CRITICAL: stop election timer
+  logger.info("LEADER_ELECTED", { leader: id });
   stopElectionTimer();
-
-  // Start heartbeat loop
   startHeartbeat(sendHeartbeat);
 }
 
-/**
- * SEND HEARTBEATS
- */
 async function sendHeartbeat() {
-  for (let peer of peers) {
-    // Skip self
+  for (const peer of peers) {
     if (peer.endsWith(port)) continue;
 
     try {
-      await axios.post(`${peer}/heartbeat`, {
+      const res = await axios.post(`${peer}/heartbeat`, {
         term: state.getTerm(),
         leaderId: id,
       });
-    } catch (err) {
-      // Ignore failures
-    }
+      if (res.data && res.data.term > state.getTerm()) {
+        stepDownAndAdoptTerm(res.data.term);
+        logger.warn("HEARTBEAT_HIGHER_TERM", { peer, higherTerm: res.data.term });
+        return;
+      }
+    } catch (_err) {}
   }
 }
 
-const log = require("./log");
-
 async function replicateEntry(entry) {
-  const index = log.appendEntry(entry);
+  const index = log.appendEntry(entry, state.getTerm());
+  const logEntry = log.getEntry(index);
+  const prevLogIndex = index - 1;
+  let successCount = 1;
 
-  let successCount = 1; // leader counts itself
-
-  for (let peer of peers) {
+  for (const peer of peers) {
     if (peer.endsWith(port)) continue;
 
     try {
       const res = await axios.post(`${peer}/append-entries`, {
         term: state.getTerm(),
         leaderId: id,
-        entry,
+        prevLogIndex,
+        entry: logEntry,
       });
 
-      if (res.data.success) successCount++;
-    } catch (err) {}
+      if (res.data.term > state.getTerm()) {
+        stepDownAndAdoptTerm(res.data.term);
+        logger.warn("STEPDOWN_DURING_REPLICATION", { peer, higherTerm: res.data.term });
+        return { committed: false, entry: logEntry };
+      }
+
+      if (res.data.success) {
+        successCount++;
+        continue;
+      }
+
+      if (res.data.needSync) {
+        const followerLastIndex = Number.isInteger(res.data.lastIndex) ? res.data.lastIndex : -1;
+        await syncPeerFromIndex(peer, followerLastIndex + 1);
+        const retry = await axios.post(`${peer}/append-entries`, {
+          term: state.getTerm(),
+          leaderId: id,
+          prevLogIndex,
+          entry: logEntry,
+        });
+        if (retry.data.success) successCount++;
+      }
+    } catch (err) {
+      logger.warn("APPEND_RPC_FAILED", { peer, error: err.message });
+    }
   }
 
-  // Majority check
   if (successCount >= 2) {
     log.commit(index);
-    console.log(`[${id}] Entry committed at index ${index}`);
-
-    return true;
+    logger.info("ENTRY_COMMITTED", { index, successCount });
+    return { committed: true, entry: log.getEntry(index) };
   }
 
-  return false;
+  logger.warn("ENTRY_NOT_COMMITTED", { index, successCount });
+  return { committed: false, entry: log.getEntry(index) };
 }
 
-async function syncWithLeader(leaderUrl) {
+async function syncPeerFromIndex(peer, fromIndex) {
   try {
-    const res = await axios.get(`${leaderUrl}/sync-log`);
-
-    const { log: leaderLog, term } = res.data;
-
-    console.log(`[${id}] Syncing log from leader`);
-
-    log.setLog(leaderLog);
-
-    // Update term if needed
-    if (term > state.getTerm()) {
-      state.incrementTerm();
-    }
-
+    const entries = log.getEntriesFrom(fromIndex);
+    await axios.post(`${peer}/install-entries`, {
+      term: state.getTerm(),
+      leaderId: id,
+      entries,
+      commitIndex: log.getCommitIndex(),
+    });
+    logger.info("FOLLOWER_SYNC_PUSHED", { peer, fromIndex, count: entries.length });
   } catch (err) {
-    console.log(`[${id}] Sync failed`);
+    logger.warn("FOLLOWER_SYNC_FAILED", { peer, fromIndex, error: err.message });
+  }
+}
+
+async function syncWithLeader(leaderUrl, fromIndex = 0) {
+  try {
+    const res = await axios.get(`${leaderUrl}/sync-log?from=${fromIndex}`);
+    const { log: leaderLog, term, commitIndex } = res.data;
+    if (!Array.isArray(leaderLog)) return false;
+
+    if (fromIndex > 0) log.installEntries(leaderLog);
+    else log.setLog(leaderLog);
+
+    if (Number.isInteger(commitIndex) && commitIndex >= 0) {
+      log.commit(commitIndex);
+    }
+    if (term > state.getTerm()) state.setTerm(term);
+
+    logger.info("FOLLOWER_SYNCED", { leaderUrl, fromIndex, entries: leaderLog.length });
+    return true;
+  } catch (err) {
+    logger.warn("FOLLOWER_SYNC_PULL_FAILED", { leaderUrl, fromIndex, error: err.message });
+    return false;
   }
 }
 
 module.exports = {
   startRaft,
-  startElection, // useful for debugging / future
+  startElection,
   replicateEntry,
   syncWithLeader,
 };
